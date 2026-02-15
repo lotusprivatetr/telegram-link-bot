@@ -4,7 +4,6 @@ import html
 import secrets
 import string
 from pathlib import Path
-from datetime import datetime, timezone
 from typing import Optional, Tuple
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -60,7 +59,8 @@ def ensure_data_file() -> None:
                 "limit": 2000,
                 "prefix": "LP",
                 "winners": {}  # user_id(str) -> code(str)
-            }
+            },
+            "started_users": []  # /start yapan user_id'ler (int list)
         }
         save_data(data)
 
@@ -79,7 +79,24 @@ def load_data() -> dict:
     data["promo"].setdefault("prefix", "LP")
     data["promo"].setdefault("winners", {})
 
+    data.setdefault("started_users", [])
+
     return data
+
+def register_started_user(user_id: int) -> None:
+    """Kullanıcı /start yaptıysa ID'sini kaydet."""
+    data = load_data()
+    lst = data.get("started_users", [])
+    # JSON listesi int veya str karışmış olabilir; normalize edelim
+    s = set()
+    for x in lst:
+        try:
+            s.add(int(x))
+        except:
+            pass
+    s.add(int(user_id))
+    data["started_users"] = sorted(s)
+    save_data(data)
 
 
 # =========================
@@ -151,23 +168,22 @@ def try_award_promo(user_id: int) -> tuple[bool, str]:
 
 
 # =========================
-# BROADCAST (Hedef: promo winners)
+# BROADCAST (Hedef: /start yapan herkes)
 # =========================
 def get_broadcast_user_ids() -> list[int]:
     data = load_data()
-    promo = data.get("promo", {})
-    winners = promo.get("winners", {})  # {"123": "LP-...", ...}
     out = []
-    for uid_str in winners.keys():
-        if str(uid_str).isdigit():
-            out.append(int(uid_str))
+    for x in data.get("started_users", []):
+        try:
+            out.append(int(x))
+        except:
+            pass
     return out
 
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
         return
 
-    # Akış başlat: önce foto, sonra caption
     context.user_data["broadcast_flow"] = {"step": "photo", "file_id": None}
 
     await update.message.reply_text(
@@ -191,7 +207,7 @@ async def handle_broadcast_photo(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("❌ Fotoğraf gelmedi. Lütfen fotoğraf gönder.")
         return
 
-    file_id = update.message.photo[-1].file_id  # en yüksek çözünür
+    file_id = update.message.photo[-1].file_id
     flow["file_id"] = file_id
     flow["step"] = "caption"
 
@@ -292,6 +308,9 @@ def url_ok(url: str) -> bool:
 # KOMUTLAR
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # /start yapanı kaydet
+    register_started_user(update.effective_user.id)
+
     if Path(BANNER_FILE).exists():
         with open(BANNER_FILE, "rb") as photo:
             await update.message.reply_photo(
@@ -333,10 +352,13 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     quick = data.get("quick", [])
     channels = data.get("channels", [])
     sites = data.get("sites", [])
+
     promo = data.get("promo", {})
     limit = int(promo.get("limit", 2000))
     winners = promo.get("winners", {})
     remaining = max(0, limit - len(winners))
+
+    started_count = len(data.get("started_users", []))
 
     def fmt(items):
         if not items:
@@ -347,6 +369,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return out
 
     text = "📌 <b>Kayıtlı Linkler</b>\n\n"
+    text += f"👥 <b>/start yapan kişi:</b> {started_count}\n"
     text += f"🎁 <b>Promo:</b> limit={limit}, alan={len(winners)}, kalan={remaining}\n\n"
     text += "⚡️ <b>Ana Menü (Quick):</b>\n" + fmt(quick) + "\n"
     text += "📣 <b>Kanallar:</b>\n" + fmt(channels) + "\n"
@@ -373,7 +396,7 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 # =========================
-# ADD WIZARD
+# ADD WIZARD (quick/site/channel)
 # =========================
 async def start_add_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, cat: str) -> None:
     if not is_admin(update.effective_user.id):
@@ -393,7 +416,7 @@ async def handle_text_flows(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not text:
         return
 
-    # -------- BROADCAST caption --------
+    # ---- BROADCAST caption ----
     bflow = context.user_data.get("broadcast_flow")
     if bflow and bflow.get("step") == "caption":
         if not is_admin(update.effective_user.id):
@@ -410,13 +433,12 @@ async def handle_text_flows(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         user_ids = get_broadcast_user_ids()
         if not user_ids:
             context.user_data.pop("broadcast_flow", None)
-            await update.message.reply_text("⚠️ Henüz hedef kitle yok. (Promo alan kullanıcı yok)")
+            await update.message.reply_text("⚠️ Henüz hedef kitle yok. (Kimse /start yapmamış)")
             return
 
         ok, fail = 0, 0
         for uid in user_ids:
             try:
-                # Caption'ı parse_mode'suz gönderiyoruz (entity hatası olmasın)
                 await context.bot.send_photo(chat_id=uid, photo=file_id, caption=caption)
                 ok += 1
             except Exception:
@@ -426,7 +448,7 @@ async def handle_text_flows(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(f"✅ Broadcast bitti.\nGönderildi: {ok}\nHata: {fail}")
         return
 
-    # -------- ADD wizard --------
+    # ---- ADD wizard ----
     flow = context.user_data.get("add_flow")
     if not flow:
         return
@@ -578,7 +600,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await smart_edit(query, HOME_TEXT_HTML, reply_markup=main_menu())
         return
 
-    # PANEL CALLBACKS
     if query.data == "back_panel":
         if not is_admin(query.from_user.id):
             return
@@ -598,9 +619,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         winners = promo.get("winners", {})
         remaining = max(0, limit - len(winners))
 
+        started_count = len(data.get("started_users", []))
+
         quick = data.get("quick", [])
-        channels = data.get("channels", [])
-        sites = data.get("sites", [])
+        channels2 = data.get("channels", [])
+        sites2 = data.get("sites", [])
 
         def fmt(items):
             if not items:
@@ -611,10 +634,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return out
 
         text = "📌 <b>Kayıtlı Linkler</b>\n\n"
+        text += f"👥 <b>/start yapan kişi:</b> {started_count}\n"
         text += f"🎁 <b>Promo:</b> limit={limit}, alan={len(winners)}, kalan={remaining}\n\n"
         text += "⚡️ <b>Ana Menü (Quick):</b>\n" + fmt(quick) + "\n"
-        text += "📣 <b>Kanallar:</b>\n" + fmt(channels) + "\n"
-        text += "🌐 <b>Siteler:</b>\n" + fmt(sites) + "\n"
+        text += "📣 <b>Kanallar:</b>\n" + fmt(channels2) + "\n"
+        text += "🌐 <b>Siteler:</b>\n" + fmt(sites2) + "\n"
         text += "Silmek için:\n<code>/delquick 1</code>  <code>/delchannel 1</code>  <code>/delsite 1</code>"
 
         await smart_edit(query, text, reply_markup=panel_back_menu())
@@ -625,8 +649,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         text = (
             "➕ <b>Ekleme</b>\n\n"
-            "Quick (ana menü):\n<code>/addquick</code>\n"
-            "Tek satır:\n<code>/addquick İsim | https://link</code>\n\n"
+            "Quick:\n<code>/addquick</code> veya <code>/addquick İsim | https://link</code>\n\n"
             "Site:\n<code>/addsite</code> veya <code>/addsite İsim | https://link</code>\n\n"
             "Kanal:\n<code>/addchannel</code> veya <code>/addchannel İsim | https://t.me/kanal</code>\n\n"
             "İptal:\n<code>/cancel</code>"
@@ -639,10 +662,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         text = (
             "➖ <b>Silme</b>\n\n"
-            "Önce listele:\n<code>/list</code>\n\n"
-            "Quick sil:\n<code>/delquick 1</code>\n"
-            "Site sil:\n<code>/delsite 1</code>\n"
-            "Kanal sil:\n<code>/delchannel 1</code>"
+            "Önce:\n<code>/list</code>\n\n"
+            "Quick:\n<code>/delquick 1</code>\n"
+            "Site:\n<code>/delsite 1</code>\n"
+            "Kanal:\n<code>/delchannel 1</code>"
         )
         await smart_edit(query, text, reply_markup=panel_back_menu())
         return
@@ -660,33 +683,28 @@ def main():
 
     app = Application.builder().token(token).build()
 
-    # UI
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(on_callback))
 
-    # Utility
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
 
-    # Admin panel + list
     app.add_handler(CommandHandler("panel", cmd_panel))
     app.add_handler(CommandHandler("list", cmd_list))
 
-    # Add
     app.add_handler(CommandHandler("addquick", cmd_addquick))
     app.add_handler(CommandHandler("addsite", cmd_addsite))
     app.add_handler(CommandHandler("addchannel", cmd_addchannel))
 
-    # Delete
     app.add_handler(CommandHandler("delquick", cmd_delquick))
     app.add_handler(CommandHandler("delsite", cmd_delsite))
     app.add_handler(CommandHandler("delchannel", cmd_delchannel))
 
-    # Broadcast (komut + foto handler)
+    # Broadcast: komut + foto handler
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
     app.add_handler(MessageHandler(filters.PHOTO, handle_broadcast_photo))
 
-    # Text flows (broadcast caption + add wizard)
+    # Text flows: broadcast caption + add wizard
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_flows))
 
     print("Bot çalışıyor... Telegram’da /start deneyebilirsin.")
