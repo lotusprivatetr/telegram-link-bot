@@ -4,6 +4,7 @@ import html
 import secrets
 import string
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Optional, Tuple
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -72,7 +73,6 @@ def load_data() -> dict:
     data.setdefault("channels", [])
     data.setdefault("sites", [])
 
-    # Promo defaults (links.json eskiyse otomatik tamamlar)
     data.setdefault("promo", {})
     data["promo"].setdefault("enabled", True)
     data["promo"].setdefault("limit", 2000)
@@ -108,11 +108,6 @@ def gen_code(prefix: str, length: int = 10) -> str:
     return f"{prefix}-" + "".join(secrets.choice(alphabet) for _ in range(length))
 
 def try_award_promo(user_id: int) -> tuple[bool, str]:
-    """
-    Returns: (won, message_html)
-    won=True: kullanıcı kod aldı veya zaten vardı
-    won=False: kampanya kapalı / dolu
-    """
     data = load_data()
     promo = data.get("promo", {})
 
@@ -126,7 +121,6 @@ def try_award_promo(user_id: int) -> tuple[bool, str]:
     remaining = max(0, limit - len(winners))
     prefix = str(promo.get("prefix", "LP")).strip() or "LP"
 
-    # Daha önce aldıysa aynı kodu göster
     if uid in winners:
         code = winners[uid]
         remaining = max(0, limit - len(winners))
@@ -137,11 +131,9 @@ def try_award_promo(user_id: int) -> tuple[bool, str]:
         )
         return (True, msg)
 
-    # Kod kalmadı
     if remaining <= 0:
         return (False, "😕 Üzgünüz, promosyon kampanyası bitti. (Kalan Kod: 0)")
 
-    # Yeni kod üret ve kaydet
     code = gen_code(prefix, length=10)
     winners[uid] = code
     promo["winners"] = winners
@@ -156,6 +148,58 @@ def try_award_promo(user_id: int) -> tuple[bool, str]:
         "<i>Kodu kaydetmeyi unutma.</i>"
     )
     return (True, msg)
+
+
+# =========================
+# BROADCAST (Hedef: promo winners)
+# =========================
+def get_broadcast_user_ids() -> list[int]:
+    data = load_data()
+    promo = data.get("promo", {})
+    winners = promo.get("winners", {})  # {"123": "LP-...", ...}
+    out = []
+    for uid_str in winners.keys():
+        if str(uid_str).isdigit():
+            out.append(int(uid_str))
+    return out
+
+async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update.effective_user.id):
+        return
+
+    # Akış başlat: önce foto, sonra caption
+    context.user_data["broadcast_flow"] = {"step": "photo", "file_id": None}
+
+    await update.message.reply_text(
+        "📣 <b>Broadcast başlatıldı</b>\n\n"
+        "1) Şimdi duyuru <b>fotoğrafını</b> gönder.\n"
+        "İptal etmek için: /cancel",
+        parse_mode="HTML",
+    )
+
+async def handle_broadcast_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    flow = context.user_data.get("broadcast_flow")
+    if not flow:
+        return
+    if not is_admin(update.effective_user.id):
+        context.user_data.pop("broadcast_flow", None)
+        return
+    if flow.get("step") != "photo":
+        return
+
+    if not update.message.photo:
+        await update.message.reply_text("❌ Fotoğraf gelmedi. Lütfen fotoğraf gönder.")
+        return
+
+    file_id = update.message.photo[-1].file_id  # en yüksek çözünür
+    flow["file_id"] = file_id
+    flow["step"] = "caption"
+
+    await update.message.reply_text(
+        "2) Şimdi bu fotoğrafın <b>açıklamasını</b> yaz (caption).\n"
+        "İptal: /cancel",
+        parse_mode="HTML",
+    )
 
 
 # =========================
@@ -180,10 +224,8 @@ def main_menu() -> InlineKeyboardMarkup:
     keyboard = []
     keyboard.append([InlineKeyboardButton("🚀 HIZLI REZERVASYON", url=FAST_RESERVATION_URL)])
 
-    # Quick linkler 2'li
     keyboard += build_2col_rows(quick)
 
-    # Sekmeler
     keyboard.append([InlineKeyboardButton("📣 Telegram Kanalları", callback_data="menu_channels")])
     keyboard.append([InlineKeyboardButton("🌐 İnternet Siteleri", callback_data="menu_sites")])
 
@@ -197,15 +239,14 @@ def list_to_keyboard(items) -> InlineKeyboardMarkup:
 def admin_panel_menu() -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton("📋 Listeyi Göster", callback_data="admin_list")],
-        [InlineKeyboardButton("➕ Ekleme (Wizard)", callback_data="admin_add_help")],
-        [InlineKeyboardButton("➖ Silme", callback_data="admin_del_help")],
+        [InlineKeyboardButton("➕ Ekleme (Yardım)", callback_data="admin_add_help")],
+        [InlineKeyboardButton("➖ Silme (Yardım)", callback_data="admin_del_help")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def panel_back_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Panele Dön", callback_data="back_panel")]])
 
-# Fotoğrafta caption, yazıda text editleyen akıllı fonksiyon (HTML)
 async def smart_edit(query, text_html: str, reply_markup=None):
     if query.message and query.message.photo:
         await query.edit_message_caption(
@@ -251,7 +292,6 @@ def url_ok(url: str) -> bool:
 # KOMUTLAR
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Ana menü (banner varsa foto, yoksa text)
     if Path(BANNER_FILE).exists():
         with open(BANNER_FILE, "rb") as photo:
             await update.message.reply_photo(
@@ -268,7 +308,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             disable_web_page_preview=True,
         )
 
-    # PROMO (her kullanıcıya 1 kere)
     won, promo_msg = try_award_promo(update.effective_user.id)
     if promo_msg:
         await update.message.reply_text(promo_msg, parse_mode="HTML", disable_web_page_preview=True)
@@ -317,17 +356,25 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    cancelled = False
+
     if context.user_data.get("add_flow"):
         context.user_data.pop("add_flow", None)
+        cancelled = True
+
+    if context.user_data.get("broadcast_flow"):
+        context.user_data.pop("broadcast_flow", None)
+        cancelled = True
+
+    if cancelled:
         await update.message.reply_text("❌ İptal edildi.")
     else:
         await update.message.reply_text("İptal edilecek bir işlem yok.")
 
 
 # =========================
-# ADD WIZARD (| olmadan ekleme)
+# ADD WIZARD
 # =========================
-# context.user_data["add_flow"] = {"cat": "...", "step": "name|url", "name": "..."}
 async def start_add_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, cat: str) -> None:
     if not is_admin(update.effective_user.id):
         return
@@ -337,7 +384,49 @@ async def start_add_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, cat
         parse_mode="HTML",
     )
 
-async def handle_add_flow_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_text_flows(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    1) Broadcast caption adımı
+    2) Add wizard adımı
+    """
+    text = (update.message.text or "").strip()
+    if not text:
+        return
+
+    # -------- BROADCAST caption --------
+    bflow = context.user_data.get("broadcast_flow")
+    if bflow and bflow.get("step") == "caption":
+        if not is_admin(update.effective_user.id):
+            context.user_data.pop("broadcast_flow", None)
+            return
+
+        caption = text
+        file_id = bflow.get("file_id")
+        if not file_id:
+            context.user_data.pop("broadcast_flow", None)
+            await update.message.reply_text("❌ Fotoğraf bulunamadı. /broadcast ile yeniden başlat.")
+            return
+
+        user_ids = get_broadcast_user_ids()
+        if not user_ids:
+            context.user_data.pop("broadcast_flow", None)
+            await update.message.reply_text("⚠️ Henüz hedef kitle yok. (Promo alan kullanıcı yok)")
+            return
+
+        ok, fail = 0, 0
+        for uid in user_ids:
+            try:
+                # Caption'ı parse_mode'suz gönderiyoruz (entity hatası olmasın)
+                await context.bot.send_photo(chat_id=uid, photo=file_id, caption=caption)
+                ok += 1
+            except Exception:
+                fail += 1
+
+        context.user_data.pop("broadcast_flow", None)
+        await update.message.reply_text(f"✅ Broadcast bitti.\nGönderildi: {ok}\nHata: {fail}")
+        return
+
+    # -------- ADD wizard --------
     flow = context.user_data.get("add_flow")
     if not flow:
         return
@@ -346,18 +435,14 @@ async def handle_add_flow_message(update: Update, context: ContextTypes.DEFAULT_
         context.user_data.pop("add_flow", None)
         return
 
-    msg = (update.message.text or "").strip()
-    if not msg:
-        return
-
     if flow.get("step") == "name":
-        flow["name"] = msg
+        flow["name"] = text
         flow["step"] = "url"
         await update.message.reply_text("2) Şimdi linki yapıştır (https://...):")
         return
 
     if flow.get("step") == "url":
-        url = msg
+        url = text
         if not url_ok(url):
             await update.message.reply_text("❌ Link formatı yanlış. https:// ile başlayan link gönder.")
             return
@@ -382,7 +467,7 @@ async def handle_add_flow_message(update: Update, context: ContextTypes.DEFAULT_
 
 
 # =========================
-# ADD (tek satır veya wizard)
+# ADD / DELETE KOMUTLARI
 # =========================
 async def cmd_addquick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
@@ -429,10 +514,6 @@ async def cmd_addchannel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     await start_add_flow(update, context, "channels")
 
-
-# =========================
-# DELETE
-# =========================
 async def del_generic(update: Update, context: ContextTypes.DEFAULT_TYPE, cat: str, usage: str) -> None:
     if not is_admin(update.effective_user.id):
         return
@@ -543,8 +624,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not is_admin(query.from_user.id):
             return
         text = (
-            "➕ <b>Ekleme (Wizard)</b>\n\n"
-            "Quick (ana menü):\n<code>/addquick</code> (sonra isim, sonra link)\n"
+            "➕ <b>Ekleme</b>\n\n"
+            "Quick (ana menü):\n<code>/addquick</code>\n"
             "Tek satır:\n<code>/addquick İsim | https://link</code>\n\n"
             "Site:\n<code>/addsite</code> veya <code>/addsite İsim | https://link</code>\n\n"
             "Kanal:\n<code>/addchannel</code> veya <code>/addchannel İsim | https://t.me/kanal</code>\n\n"
@@ -601,8 +682,12 @@ def main():
     app.add_handler(CommandHandler("delsite", cmd_delsite))
     app.add_handler(CommandHandler("delchannel", cmd_delchannel))
 
-    # Wizard text handler
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_flow_message))
+    # Broadcast (komut + foto handler)
+    app.add_handler(CommandHandler("broadcast", cmd_broadcast))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_broadcast_photo))
+
+    # Text flows (broadcast caption + add wizard)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_flows))
 
     print("Bot çalışıyor... Telegram’da /start deneyebilirsin.")
     app.run_polling()
