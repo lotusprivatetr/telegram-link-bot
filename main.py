@@ -1,8 +1,6 @@
 import os
 import json
 import html
-import secrets
-import string
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -54,13 +52,7 @@ def ensure_data_file() -> None:
             "quick": [],
             "channels": DEFAULT_CHANNELS,
             "sites": DEFAULT_SITES,
-            "promo": {
-                "enabled": True,
-                "limit": 2000,
-                "prefix": "LP",
-                "winners": {}  # user_id(str) -> code(str)
-            },
-            "started_users": []  # /start yapan user_id'ler (int list)
+            "started_users": []  # /start yapan user_id'ler
         }
         save_data(data)
 
@@ -72,13 +64,6 @@ def load_data() -> dict:
     data.setdefault("quick", [])
     data.setdefault("channels", [])
     data.setdefault("sites", [])
-
-    data.setdefault("promo", {})
-    data["promo"].setdefault("enabled", True)
-    data["promo"].setdefault("limit", 2000)
-    data["promo"].setdefault("prefix", "LP")
-    data["promo"].setdefault("winners", {})
-
     data.setdefault("started_users", [])
 
     return data
@@ -87,13 +72,14 @@ def register_started_user(user_id: int) -> None:
     """Kullanıcı /start yaptıysa ID'sini kaydet."""
     data = load_data()
     lst = data.get("started_users", [])
-    # JSON listesi int veya str karışmış olabilir; normalize edelim
+
     s = set()
     for x in lst:
         try:
             s.add(int(x))
         except:
             pass
+
     s.add(int(user_id))
     data["started_users"] = sorted(s)
     save_data(data)
@@ -115,56 +101,6 @@ def get_admin_ids() -> set[int]:
 
 def is_admin(user_id: int) -> bool:
     return user_id in get_admin_ids()
-
-
-# =========================
-# PROMO (İLK 2000 KİŞİ)
-# =========================
-def gen_code(prefix: str, length: int = 10) -> str:
-    alphabet = string.ascii_uppercase + string.digits
-    return f"{prefix}-" + "".join(secrets.choice(alphabet) for _ in range(length))
-
-def try_award_promo(user_id: int) -> tuple[bool, str]:
-    data = load_data()
-    promo = data.get("promo", {})
-
-    if not promo.get("enabled", True):
-        return (False, "🎁 Promo kampanyası şu an kapalı.")
-
-    winners: dict = promo.get("winners", {})
-    uid = str(user_id)
-
-    limit = int(promo.get("limit", 2000))
-    remaining = max(0, limit - len(winners))
-    prefix = str(promo.get("prefix", "LP")).strip() or "LP"
-
-    if uid in winners:
-        code = winners[uid]
-        remaining = max(0, limit - len(winners))
-        msg = (
-            f"🎉 <b>Promosyon Kodun:</b> <code>{html.escape(code)}</code>\n"
-            f"📌 <b>Kalan Kod:</b> {remaining}\n\n"
-            "<i>Kodu kaydetmeyi unutma.</i>"
-        )
-        return (True, msg)
-
-    if remaining <= 0:
-        return (False, "😕 Üzgünüz, promosyon kampanyası bitti. (Kalan Kod: 0)")
-
-    code = gen_code(prefix, length=10)
-    winners[uid] = code
-    promo["winners"] = winners
-    data["promo"] = promo
-    save_data(data)
-
-    remaining = max(0, limit - len(winners))
-    msg = (
-        f"🎉 <b>Tebrikler!</b>\n"
-        f"Promosyon Kodun: <code>{html.escape(code)}</code>\n"
-        f"📌 <b>Kalan Kod:</b> {remaining}\n\n"
-        "<i>Kodu kaydetmeyi unutma.</i>"
-    )
-    return (True, msg)
 
 
 # =========================
@@ -197,9 +133,11 @@ async def handle_broadcast_photo(update: Update, context: ContextTypes.DEFAULT_T
     flow = context.user_data.get("broadcast_flow")
     if not flow:
         return
+
     if not is_admin(update.effective_user.id):
         context.user_data.pop("broadcast_flow", None)
         return
+
     if flow.get("step") != "photo":
         return
 
@@ -308,7 +246,6 @@ def url_ok(url: str) -> bool:
 # KOMUTLAR
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # /start yapanı kaydet
     register_started_user(update.effective_user.id)
 
     if Path(BANNER_FILE).exists():
@@ -326,10 +263,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
-
-    won, promo_msg = try_award_promo(update.effective_user.id)
-    if promo_msg:
-        await update.message.reply_text(promo_msg, parse_mode="HTML", disable_web_page_preview=True)
 
 async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Senin Telegram ID: {update.effective_user.id}")
@@ -352,12 +285,6 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     quick = data.get("quick", [])
     channels = data.get("channels", [])
     sites = data.get("sites", [])
-
-    promo = data.get("promo", {})
-    limit = int(promo.get("limit", 2000))
-    winners = promo.get("winners", {})
-    remaining = max(0, limit - len(winners))
-
     started_count = len(data.get("started_users", []))
 
     def fmt(items):
@@ -369,8 +296,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return out
 
     text = "📌 <b>Kayıtlı Linkler</b>\n\n"
-    text += f"👥 <b>/start yapan kişi:</b> {started_count}\n"
-    text += f"🎁 <b>Promo:</b> limit={limit}, alan={len(winners)}, kalan={remaining}\n\n"
+    text += f"👥 <b>/start yapan kişi:</b> {started_count}\n\n"
     text += "⚡️ <b>Ana Menü (Quick):</b>\n" + fmt(quick) + "\n"
     text += "📣 <b>Kanallar:</b>\n" + fmt(channels) + "\n"
     text += "🌐 <b>Siteler:</b>\n" + fmt(sites) + "\n"
@@ -408,10 +334,6 @@ async def start_add_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, cat
     )
 
 async def handle_text_flows(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    1) Broadcast caption adımı
-    2) Add wizard adımı
-    """
     text = (update.message.text or "").strip()
     if not text:
         return
@@ -614,16 +536,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not is_admin(query.from_user.id):
             return
 
-        promo = data.get("promo", {})
-        limit = int(promo.get("limit", 2000))
-        winners = promo.get("winners", {})
-        remaining = max(0, limit - len(winners))
-
-        started_count = len(data.get("started_users", []))
-
         quick = data.get("quick", [])
         channels2 = data.get("channels", [])
         sites2 = data.get("sites", [])
+        started_count = len(data.get("started_users", []))
 
         def fmt(items):
             if not items:
@@ -634,8 +550,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return out
 
         text = "📌 <b>Kayıtlı Linkler</b>\n\n"
-        text += f"👥 <b>/start yapan kişi:</b> {started_count}\n"
-        text += f"🎁 <b>Promo:</b> limit={limit}, alan={len(winners)}, kalan={remaining}\n\n"
+        text += f"👥 <b>/start yapan kişi:</b> {started_count}\n\n"
         text += "⚡️ <b>Ana Menü (Quick):</b>\n" + fmt(quick) + "\n"
         text += "📣 <b>Kanallar:</b>\n" + fmt(channels2) + "\n"
         text += "🌐 <b>Siteler:</b>\n" + fmt(sites2) + "\n"
@@ -700,11 +615,9 @@ def main():
     app.add_handler(CommandHandler("delsite", cmd_delsite))
     app.add_handler(CommandHandler("delchannel", cmd_delchannel))
 
-    # Broadcast: komut + foto handler
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
     app.add_handler(MessageHandler(filters.PHOTO, handle_broadcast_photo))
 
-    # Text flows: broadcast caption + add wizard
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_flows))
 
     print("Bot çalışıyor... Telegram’da /start deneyebilirsin.")
