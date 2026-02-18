@@ -52,7 +52,11 @@ def ensure_data_file() -> None:
             "quick": [],
             "channels": DEFAULT_CHANNELS,
             "sites": DEFAULT_SITES,
-            "started_users": []  # /start yapan user_id'ler
+            "started_users": [],
+            "analytics": {  # yeni
+                "clicks": {},  # button_key -> total clicks
+                "users": {},   # user_id(str) -> {button_key -> clicks}
+            },
         }
         save_data(data)
 
@@ -66,10 +70,13 @@ def load_data() -> dict:
     data.setdefault("sites", [])
     data.setdefault("started_users", [])
 
+    data.setdefault("analytics", {})
+    data["analytics"].setdefault("clicks", {})
+    data["analytics"].setdefault("users", {})
+
     return data
 
 def register_started_user(user_id: int) -> None:
-    """Kullanıcı /start yaptıysa ID'sini kaydet."""
     data = load_data()
     lst = data.get("started_users", [])
 
@@ -82,6 +89,27 @@ def register_started_user(user_id: int) -> None:
 
     s.add(int(user_id))
     data["started_users"] = sorted(s)
+    save_data(data)
+
+def track_click(user_id: int, button_key: str) -> None:
+    """
+    Sadece callback_data'lı butonlar burada sayılır.
+    URL butonlarının tıklanması Telegram tarafından bota bildirilmez.
+    """
+    data = load_data()
+    a = data.get("analytics", {})
+    clicks = a.get("clicks", {})
+    users = a.get("users", {})
+
+    clicks[button_key] = int(clicks.get(button_key, 0)) + 1
+
+    uid = str(user_id)
+    users.setdefault(uid, {})
+    users[uid][button_key] = int(users[uid].get(button_key, 0)) + 1
+
+    a["clicks"] = clicks
+    a["users"] = users
+    data["analytics"] = a
     save_data(data)
 
 
@@ -176,6 +204,7 @@ def main_menu() -> InlineKeyboardMarkup:
     quick = data.get("quick", [])
 
     keyboard = []
+    # NOT: URL buton tıklamasını sayamayız (Telegram bildirmiyor)
     keyboard.append([InlineKeyboardButton("🚀 HIZLI REZERVASYON", url=FAST_RESERVATION_URL)])
 
     keyboard += build_2col_rows(quick)
@@ -303,6 +332,54 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text += "Silmek için:\n<code>/delquick 1</code>  <code>/delchannel 1</code>  <code>/delsite 1</code>"
 
     await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
+
+async def cmd_analiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update.effective_user.id):
+        return
+
+    data = load_data()
+    started_count = len(data.get("started_users", []))
+    a = data.get("analytics", {})
+    clicks = a.get("clicks", {})
+    users = a.get("users", {})
+
+    # kaç farklı kişi hangi butona basmış
+    unique_by_button = {}
+    for uid, per in users.items():
+        for key, cnt in per.items():
+            if int(cnt) > 0:
+                unique_by_button.setdefault(key, set()).add(uid)
+
+    # clickleri çoktan aza sırala
+    sorted_clicks = sorted(clicks.items(), key=lambda x: int(x[1]), reverse=True)
+
+    text = "📊 <b>ANALİZ</b>\n\n"
+    text += f"👥 <b>/start yapan toplam kişi:</b> {started_count}\n\n"
+
+    if not sorted_clicks:
+        text += "Henüz buton tıklaması yok.\n"
+        text += "\nNot: URL buton tıklamaları Telegram tarafından bota bildirilmez."
+        await update.message.reply_text(text, parse_mode="HTML")
+        return
+
+    text += "🔘 <b>Buton Tıklamaları</b>\n"
+    for key, cnt in sorted_clicks:
+        uniq = len(unique_by_button.get(key, set()))
+        text += f"• <code>{html.escape(str(key))}</code> → <b>{int(cnt)}</b> tık / <b>{uniq}</b> kişi\n"
+
+    # En çok tıklayan ilk 10 (isteğe bağlı, faydalı)
+    totals = []
+    for uid, per in users.items():
+        total = sum(int(v) for v in per.values())
+        totals.append((uid, total))
+    totals.sort(key=lambda x: x[1], reverse=True)
+
+    text += "\n🏆 <b>En Çok Tıklayanlar (Top 10)</b>\n"
+    for uid, total in totals[:10]:
+        text += f"• <code>{uid}</code> → <b>{total}</b>\n"
+
+    text += "\n<i>Not: URL buton tıklamaları sayılmaz. İstersen onları da izlenebilir yaparız.</i>"
+    await update.message.reply_text(text, parse_mode="HTML")
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cancelled = False
@@ -498,6 +575,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     query = update.callback_query
     await query.answer()
 
+    # ANALYTICS: callback_data butonları sayılır
+    if query.data:
+        track_click(query.from_user.id, query.data)
+
     data = load_data()
     channels = data.get("channels", [])
     sites = data.get("sites", [])
@@ -606,6 +687,7 @@ def main():
 
     app.add_handler(CommandHandler("panel", cmd_panel))
     app.add_handler(CommandHandler("list", cmd_list))
+    app.add_handler(CommandHandler("analiz", cmd_analiz))
 
     app.add_handler(CommandHandler("addquick", cmd_addquick))
     app.add_handler(CommandHandler("addsite", cmd_addsite))
