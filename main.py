@@ -3,6 +3,7 @@ import json
 import html
 from pathlib import Path
 from typing import Optional, Tuple
+from datetime import time
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -19,7 +20,9 @@ from telegram.ext import (
 # =========================
 DATA_FILE = Path("links.json")
 BANNER_FILE = "banner.jpg"
+SPONSOR_FILE = "sponsors.jpg"
 FAST_RESERVATION_URL = "https://t.me/lotusprivate?direct"
+SPONSOR_URL = "https://bio.site/lotussiteler.com"
 
 HOME_TEXT_HTML = (
     "✨ <b>Lotus Private Link Merkezi</b>\n"
@@ -46,6 +49,7 @@ def save_data(data: dict) -> None:
     with DATA_FILE.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+
 def ensure_data_file() -> None:
     if not DATA_FILE.exists():
         data = {
@@ -53,12 +57,13 @@ def ensure_data_file() -> None:
             "channels": DEFAULT_CHANNELS,
             "sites": DEFAULT_SITES,
             "started_users": [],
-            "analytics": {  # yeni
-                "clicks": {},  # button_key -> total clicks
-                "users": {},   # user_id(str) -> {button_key -> clicks}
+            "analytics": {
+                "clicks": {},
+                "users": {},
             },
         }
         save_data(data)
+
 
 def load_data() -> dict:
     ensure_data_file()
@@ -69,12 +74,12 @@ def load_data() -> dict:
     data.setdefault("channels", [])
     data.setdefault("sites", [])
     data.setdefault("started_users", [])
-
     data.setdefault("analytics", {})
     data["analytics"].setdefault("clicks", {})
     data["analytics"].setdefault("users", {})
 
     return data
+
 
 def register_started_user(user_id: int) -> None:
     data = load_data()
@@ -84,22 +89,19 @@ def register_started_user(user_id: int) -> None:
     for x in lst:
         try:
             s.add(int(x))
-        except:
+        except Exception:
             pass
 
     s.add(int(user_id))
     data["started_users"] = sorted(s)
     save_data(data)
 
+
 def track_click(user_id: int, button_key: str) -> None:
-    """
-    Sadece callback_data'lı butonlar burada sayılır.
-    URL butonlarının tıklanması Telegram tarafından bota bildirilmez.
-    """
     data = load_data()
-    a = data.get("analytics", {})
-    clicks = a.get("clicks", {})
-    users = a.get("users", {})
+    analytics = data.get("analytics", {})
+    clicks = analytics.get("clicks", {})
+    users = analytics.get("users", {})
 
     clicks[button_key] = int(clicks.get(button_key, 0)) + 1
 
@@ -107,9 +109,9 @@ def track_click(user_id: int, button_key: str) -> None:
     users.setdefault(uid, {})
     users[uid][button_key] = int(users[uid].get(button_key, 0)) + 1
 
-    a["clicks"] = clicks
-    a["users"] = users
-    data["analytics"] = a
+    analytics["clicks"] = clicks
+    analytics["users"] = users
+    data["analytics"] = analytics
     save_data(data)
 
 
@@ -120,12 +122,14 @@ def get_admin_ids() -> set[int]:
     raw = os.getenv("ADMIN_IDS", "").strip()
     if not raw:
         return set()
+
     out: set[int] = set()
     for part in raw.split(","):
         part = part.strip()
         if part.isdigit():
             out.add(int(part))
     return out
+
 
 def is_admin(user_id: int) -> bool:
     return user_id in get_admin_ids()
@@ -140,9 +144,10 @@ def get_broadcast_user_ids() -> list[int]:
     for x in data.get("started_users", []):
         try:
             out.append(int(x))
-        except:
+        except Exception:
             pass
     return out
+
 
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
@@ -156,6 +161,7 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "İptal etmek için: /cancel",
         parse_mode="HTML",
     )
+
 
 async def handle_broadcast_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     flow = context.user_data.get("broadcast_flow")
@@ -185,6 +191,36 @@ async def handle_broadcast_photo(update: Update, context: ContextTypes.DEFAULT_T
 
 
 # =========================
+# GÜNLÜK SPONSOR MESAJI
+# =========================
+async def send_daily_sponsor(context: ContextTypes.DEFAULT_TYPE):
+    user_ids = get_broadcast_user_ids()
+    if not user_ids:
+        return
+
+    if not Path(SPONSOR_FILE).exists():
+        return
+
+    keyboard = [
+        [InlineKeyboardButton("TÜM SPONSORLAR", url=SPONSOR_URL)]
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+
+    for user_id in user_ids:
+        try:
+            with open(SPONSOR_FILE, "rb") as photo:
+                await context.bot.send_photo(
+                    chat_id=user_id,
+                    photo=photo,
+                    caption="⭐️ <b>TÜM SPONSORLAR</b>",
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                )
+        except Exception:
+            pass
+
+
+# =========================
 # UI / MENÜLER
 # =========================
 def build_2col_rows(items):
@@ -199,25 +235,25 @@ def build_2col_rows(items):
         rows.append(row)
     return rows
 
+
 def main_menu() -> InlineKeyboardMarkup:
     data = load_data()
     quick = data.get("quick", [])
 
     keyboard = []
-    # NOT: URL buton tıklamasını sayamayız (Telegram bildirmiyor)
     keyboard.append([InlineKeyboardButton("🚀 HIZLI REZERVASYON", url=FAST_RESERVATION_URL)])
-
     keyboard += build_2col_rows(quick)
-
     keyboard.append([InlineKeyboardButton("📣 Telegram Kanalları", callback_data="menu_channels")])
     keyboard.append([InlineKeyboardButton("🌐 İnternet Siteleri", callback_data="menu_sites")])
 
     return InlineKeyboardMarkup(keyboard)
 
+
 def list_to_keyboard(items) -> InlineKeyboardMarkup:
     keyboard = build_2col_rows(items)
     keyboard.append([InlineKeyboardButton("⬅️ Geri", callback_data="back_home")])
     return InlineKeyboardMarkup(keyboard)
+
 
 def admin_panel_menu() -> InlineKeyboardMarkup:
     keyboard = [
@@ -227,8 +263,10 @@ def admin_panel_menu() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(keyboard)
 
+
 def panel_back_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Panele Dön", callback_data="back_panel")]])
+
 
 async def smart_edit(query, text_html: str, reply_markup=None):
     if query.message and query.message.photo:
@@ -253,13 +291,17 @@ def parse_add_args(text: str) -> Tuple[Optional[str], Optional[str]]:
     parts = text.split(" ", 1)
     if len(parts) < 2:
         return None, None
+
     payload = parts[1]
     if "|" not in payload:
         return None, None
+
     name, url = [x.strip() for x in payload.split("|", 1)]
     if not name or not url:
         return None, None
+
     return name, url
+
 
 def url_ok(url: str) -> bool:
     url = url.strip()
@@ -293,18 +335,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             disable_web_page_preview=True,
         )
 
+
 async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Senin Telegram ID: {update.effective_user.id}")
+
 
 async def cmd_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
         return
+
     await update.message.reply_text(
         "🛠 <b>Admin Panel</b>\nAşağıdan seç 👇",
         reply_markup=admin_panel_menu(),
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
+
 
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
@@ -333,32 +379,31 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
 
+
 async def cmd_analiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
         return
 
     data = load_data()
     started_count = len(data.get("started_users", []))
-    a = data.get("analytics", {})
-    clicks = a.get("clicks", {})
-    users = a.get("users", {})
+    analytics = data.get("analytics", {})
+    clicks = analytics.get("clicks", {})
+    users = analytics.get("users", {})
 
-    # kaç farklı kişi hangi butona basmış
     unique_by_button = {}
     for uid, per in users.items():
         for key, cnt in per.items():
             if int(cnt) > 0:
                 unique_by_button.setdefault(key, set()).add(uid)
 
-    # clickleri çoktan aza sırala
     sorted_clicks = sorted(clicks.items(), key=lambda x: int(x[1]), reverse=True)
 
     text = "📊 <b>ANALİZ</b>\n\n"
     text += f"👥 <b>/start yapan toplam kişi:</b> {started_count}\n\n"
 
     if not sorted_clicks:
-        text += "Henüz buton tıklaması yok.\n"
-        text += "\nNot: URL buton tıklamaları Telegram tarafından bota bildirilmez."
+        text += "Henüz callback buton tıklaması yok.\n"
+        text += "\n<i>Not: URL buton tıklamaları Telegram tarafından bota bildirilmez.</i>"
         await update.message.reply_text(text, parse_mode="HTML")
         return
 
@@ -367,7 +412,6 @@ async def cmd_analiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         uniq = len(unique_by_button.get(key, set()))
         text += f"• <code>{html.escape(str(key))}</code> → <b>{int(cnt)}</b> tık / <b>{uniq}</b> kişi\n"
 
-    # En çok tıklayan ilk 10 (isteğe bağlı, faydalı)
     totals = []
     for uid, per in users.items():
         total = sum(int(v) for v in per.values())
@@ -378,8 +422,9 @@ async def cmd_analiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     for uid, total in totals[:10]:
         text += f"• <code>{uid}</code> → <b>{total}</b>\n"
 
-    text += "\n<i>Not: URL buton tıklamaları sayılmaz. İstersen onları da izlenebilir yaparız.</i>"
+    text += "\n<i>Not: URL buton tıklamaları sayılmaz.</i>"
     await update.message.reply_text(text, parse_mode="HTML")
+
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cancelled = False
@@ -399,23 +444,25 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 # =========================
-# ADD WIZARD (quick/site/channel)
+# ADD WIZARD
 # =========================
 async def start_add_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, cat: str) -> None:
     if not is_admin(update.effective_user.id):
         return
+
     context.user_data["add_flow"] = {"cat": cat, "step": "name", "name": ""}
     await update.message.reply_text(
         "✅ <b>Ekleme başlatıldı</b>\n\n1) Link adı yaz (butonda gözükecek isim):",
         parse_mode="HTML",
     )
 
+
 async def handle_text_flows(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.message.text or "").strip()
     if not text:
         return
 
-    # ---- BROADCAST caption ----
+    # BROADCAST caption
     bflow = context.user_data.get("broadcast_flow")
     if bflow and bflow.get("step") == "caption":
         if not is_admin(update.effective_user.id):
@@ -447,7 +494,7 @@ async def handle_text_flows(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(f"✅ Broadcast bitti.\nGönderildi: {ok}\nHata: {fail}")
         return
 
-    # ---- ADD wizard ----
+    # ADD wizard
     flow = context.user_data.get("add_flow")
     if not flow:
         return
@@ -493,6 +540,7 @@ async def handle_text_flows(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def cmd_addquick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
         return
+
     name, url = parse_add_args(update.message.text)
     if name and url:
         if not url_ok(url):
@@ -503,11 +551,14 @@ async def cmd_addquick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         save_data(data)
         await update.message.reply_text("✅ Ana menüye eklendi. /start ile görebilirsin.")
         return
+
     await start_add_flow(update, context, "quick")
+
 
 async def cmd_addsite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
         return
+
     name, url = parse_add_args(update.message.text)
     if name and url:
         if not url_ok(url):
@@ -518,11 +569,14 @@ async def cmd_addsite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         save_data(data)
         await update.message.reply_text("✅ Site eklendi. /list ile kontrol et.")
         return
+
     await start_add_flow(update, context, "sites")
+
 
 async def cmd_addchannel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
         return
+
     name, url = parse_add_args(update.message.text)
     if name and url:
         if not url_ok(url):
@@ -533,7 +587,9 @@ async def cmd_addchannel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         save_data(data)
         await update.message.reply_text("✅ Kanal eklendi. /list ile kontrol et.")
         return
+
     await start_add_flow(update, context, "channels")
+
 
 async def del_generic(update: Update, context: ContextTypes.DEFAULT_TYPE, cat: str, usage: str) -> None:
     if not is_admin(update.effective_user.id):
@@ -558,11 +614,14 @@ async def del_generic(update: Update, context: ContextTypes.DEFAULT_TYPE, cat: s
 
     await update.message.reply_text(f"🗑️ Silindi: {removed[0]}")
 
+
 async def cmd_delquick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await del_generic(update, context, "quick", "/delquick 1")
 
+
 async def cmd_delsite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await del_generic(update, context, "sites", "/delsite 1")
+
 
 async def cmd_delchannel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await del_generic(update, context, "channels", "/delchannel 1")
@@ -575,7 +634,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     query = update.callback_query
     await query.answer()
 
-    # ANALYTICS: callback_data butonları sayılır
     if query.data:
         track_click(query.from_user.id, query.data)
 
@@ -679,6 +737,12 @@ def main():
 
     app = Application.builder().token(token).build()
 
+    # Günlük sponsor gönderimi
+    app.job_queue.run_daily(
+        send_daily_sponsor,
+        time=time(hour=20, minute=0),
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(on_callback))
 
@@ -699,12 +763,11 @@ def main():
 
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
     app.add_handler(MessageHandler(filters.PHOTO, handle_broadcast_photo))
-
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_flows))
 
     print("Bot çalışıyor... Telegram’da /start deneyebilirsin.")
     app.run_polling()
 
+
 if __name__ == "__main__":
     main()
-
