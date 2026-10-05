@@ -22,7 +22,7 @@ DATA_FILE = Path("links.json")
 BANNER_FILE = "banner.jpg"
 TZ = ZoneInfo("Europe/Istanbul")
 
-FAST_RESERVATION_URL = "https://t.me/lotusprivate?direct"
+FAST_RESERVATION_URL = "https://t.me/lotusresmi?direct"
 CURRENT_ENTRY_URL = "https://lotusprivate.live/giris"
 
 HOME_TEXT_HTML = (
@@ -32,9 +32,9 @@ HOME_TEXT_HTML = (
 
 # Telegram adresleri
 TELEGRAM_LINKS = [
-    ["Ana Kanal", "https://t.me/lotusprivate"],
-    ["Etkinlik ve Duyuru", "https://t.me/lotusprivatelive"],
-    ["Freespin Kod", "https://t.me/lotusprivatekod"],
+    ["Ana Kanal", "https://t.me/lotusresmi"],
+    ["Etkinlik ve Duyuru", "https://t.me/lotusduyuru"],
+    ["Freespin Kod", "https://t.me/lotuskod"],
     ["Lotus Private VIP", "https://t.me/+ESFVuQOKhfc2ZWY0"],
 ]
 
